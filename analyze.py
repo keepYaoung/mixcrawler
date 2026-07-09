@@ -77,10 +77,33 @@ def md_escape(s):
     return (s or "").replace("\n", " ").replace("|", "/").strip()
 
 
+def blockquote(text, cap=3500):
+    """Render body text as a markdown blockquote, preserving paragraphs."""
+    text = (text or "").strip()
+    truncated = len(text) > cap
+    if truncated:
+        text = text[:cap].rsplit(" ", 1)[0] + " …"
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    out = "\n".join(f"> {ln}" if ln else ">" for ln in lines)
+    if truncated:
+        out += "\n>\n> _(본문 일부 — 전문은 위 링크)_"
+    return out
+
+
+def stamp_from_path(path):
+    """crawl_YYYYMMDD_HHMMSS.jsonl -> 'YYMMDD-HHMM'; fallback to now."""
+    m = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})", os.path.basename(path))
+    if m:
+        y, mo, d, hh, mm = m.groups()
+        return f"{y[2:]}{mo}{d}-{hh}{mm}"
+    return datetime.now().strftime("%y%m%d-%H%M")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("path", nargs="?")
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--out", default=None, help="explicit output path (overrides folder/name)")
+    ap.add_argument("--title", default="PTE_경향리포트", help="report title used in filename")
     a = ap.parse_args()
 
     path = a.path
@@ -144,23 +167,49 @@ def main():
         P(f"| {w} | {c} |")
     P("")
 
-    P("## 5. 고득점자 조언 — 추천 많은 댓글 TOP\n")
-    for c in top_by_score(coms, n=10):
-        P(f"- **[+{c['score']}]** {md_escape(c['text'])[:280]}  \n  <{c['url']}>")
+    # ---- 5. Full-text advice / experience posts (the goldmine) ----
+    P("## 5. 고득점 후기·상세 팁 글 (본문 전문)\n")
+    P("_추천수(score) 순. 본문이 있는 후기/팁 글만. 긴 글은 발췌 후 원문 링크._\n")
+    rich_posts = [p for p in posts
+                  if isinstance(p.get("score"), int) and len((p.get("text") or "")) >= 400]
+    rich_posts.sort(key=lambda p: p["score"], reverse=True)
+    for p in rich_posts[:12]:
+        P(f"### [+{p['score']}] {md_escape(p['title'])[:200]}")
+        P(f"<{p['url']}>\n")
+        P(blockquote(p.get("text", ""), cap=3500))
+        P("")
+
+    # ---- 6. Long advice comments ----
+    P("## 6. 조언 댓글 (긴 발췌)\n")
+    P("_추천수 순. 80자 이상 실질 조언만(단순 축하 댓글 제외)._\n")
+    adv_coms = [c for c in coms
+                if isinstance(c.get("score"), int) and len((c.get("text") or "")) >= 80]
+    adv_coms.sort(key=lambda c: c["score"], reverse=True)
+    for c in adv_coms[:20]:
+        P(f"- **[+{c['score']}]** {md_escape(c['text'])[:900]}  \n  <{c['url']}>")
     P("")
 
-    P("## 6. 추천 많은 글 (경험담/후기) TOP\n")
-    for p in top_by_score(posts, n=8, min_len=10):
+    # ---- 7. Short success-story posts (titles only, for breadth) ----
+    P("## 7. 그 밖의 후기 글 (제목)\n")
+    thin = [p for p in posts if isinstance(p.get("score"), int) and len((p.get("text") or "")) < 400]
+    thin.sort(key=lambda p: p["score"], reverse=True)
+    for p in thin[:12]:
         P(f"- **[+{p['score']}]** {md_escape(p['title'])[:160]}  \n  <{p['url']}>")
     P("")
 
     report = "\n".join(L)
-    out = a.out or os.path.join(os.path.dirname(os.path.abspath(path)), "..", "REPORT.md")
-    out = os.path.abspath(out)
+    if a.out:
+        out = os.path.abspath(a.out)
+    else:
+        here = os.path.dirname(os.path.abspath(__file__))
+        reports_dir = os.path.join(here, "reports")
+        os.makedirs(reports_dir, exist_ok=True)
+        fname = f"{stamp_from_path(path)}-{a.title}.md"
+        out = os.path.join(reports_dir, fname)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(report)
-    print(report)
-    print(f"\n[saved] {out}", file=sys.stderr)
+    print(f"[saved] {out}", file=sys.stderr)
 
 
 if __name__ == "__main__":
