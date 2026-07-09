@@ -2,29 +2,30 @@
   "days_back": 90,
 
   "keywords": [
-    "keyword1",
-    "keyword2"
+    "template", "79", "90", "essay", "rescore", "speaking",
+    "read aloud", "retell lecture", "summarize", "apeuni", "pearson"
   ],
 
   "phrases": [
-    "an exact sentence or phrase to look for",
-    "another multi word phrase"
+    "do not overcomplicate",
+    "got my desired score",
+    "rescore success"
   ],
 
   "sources": {
     "reddit": {
       "enabled": true,
-      "limit_per_query": 300,
-      "subreddit": null,
+      "subreddit": "PTE",
+      "include_comments": true,
+      "limit_per_query": 1500,
       "client_id": "",
       "client_secret": ""
     },
-    "hackernews":  { "enabled": true,  "limit_per_query": 300 },
+    "hackernews":  { "enabled": false, "limit_per_query": 300 },
     "googlenews":  { "enabled": true,  "hl": "en-US", "gl": "US", "ceid": "US:en" }
   },
 
   "match_mode": "any",
-
-  "request_delay_sec": 1.0,
+  "request_delay_sec": 0.5,
   "output_dir": "output"
 }

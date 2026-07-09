@@ -64,8 +64,8 @@ def http_get(url, params=None, timeout=30, retries=3):
             )
             if r.status_code == 200:
                 return r
-            # 429 / 5xx -> backoff and retry
-            if r.status_code in (429, 500, 502, 503, 504):
+            # 429 / 422 / 5xx -> transient (rate limit / hiccup): backoff and retry
+            if r.status_code in (429, 422, 500, 502, 503, 504):
                 time.sleep(2 * attempt)
                 continue
             sys.stderr.write(f"  ! HTTP {r.status_code} for {r.url}\n")
@@ -97,6 +97,12 @@ def http_get(url, params=None, timeout=30, retries=3):
 REDDIT_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 REDDIT_OAUTH = "https://oauth.reddit.com"
 ARCTIC_POSTS = "https://arctic-shift.photon-reddit.com/api/posts/search"
+ARCTIC_COMMENTS = "https://arctic-shift.photon-reddit.com/api/comments/search"
+
+
+def _arctic_date(epoch):
+    """Arctic Shift wants a timezone-LESS ISO datetime (a '+00:00' offset breaks it)."""
+    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def reddit_get_token(client_id, client_secret):
@@ -118,13 +124,17 @@ def reddit_get_token(client_id, client_secret):
 
 
 def fetch_reddit(query, after_epoch, before_epoch, limit, token=None,
-                 subreddit=None, delay=1.0):
+                 subreddit=None, delay=1.0, include_comments=False):
     if token:
         return _fetch_reddit_oauth(query, after_epoch, before_epoch, limit,
                                    token, subreddit, delay)
     if subreddit:
-        return _fetch_reddit_arctic(query, after_epoch, before_epoch, limit,
-                                    subreddit, delay)
+        out = _fetch_reddit_arctic(ARCTIC_POSTS, query, after_epoch, before_epoch,
+                                   limit, subreddit, delay, kind="post")
+        if include_comments:
+            out += _fetch_reddit_arctic(ARCTIC_COMMENTS, query, after_epoch, before_epoch,
+                                        limit, subreddit, delay, kind="comment")
+        return out
     return []  # no creds and no subreddit -> nothing we can legally fetch
 
 
@@ -168,34 +178,74 @@ def _fetch_reddit_oauth(query, after_epoch, before_epoch, limit, token,
     return out[:limit]
 
 
-def _fetch_reddit_arctic(query, after_epoch, before_epoch, limit, subreddit, delay):
-    out, cursor = [], after_epoch
+def _fetch_reddit_arctic(endpoint, query, after_epoch, before_epoch, limit,
+                         subreddit, delay, kind="post"):
+    # Paginate NEWEST -> OLDEST so that, if `limit` is hit, we keep the most
+    # RECENT items (what "recent trends" needs) and drop only older ones.
+    out, cursor = [], before_epoch
     while len(out) < limit:
         params = {
-            "subreddit": subreddit, "query": query,
-            "after": iso(cursor), "before": iso(before_epoch),
-            "limit": min(100, limit - len(out)), "sort": "asc",
+            "subreddit": subreddit,
+            "after": _arctic_date(after_epoch), "before": _arctic_date(cursor),
+            "limit": min(100, limit - len(out)), "sort": "desc",
         }
-        r = http_get(ARCTIC_POSTS, params=params)
-        if r is None:
+        if query and query != "*":      # "*" or empty -> pull everything in the sub
+            # posts: `query` searches title+selftext; comments: text param is `body`
+            params["body" if kind == "comment" else "query"] = query
+
+        # Arctic Shift returns {"data": null, "error": "Under maintenance"} as HTTP
+        # 200 when an endpoint is temporarily down. Retry that a few times before
+        # giving up so a brief blip doesn't silently truncate the crawl.
+        data, maint = None, False
+        for attempt in range(1, 6):
+            r = http_get(endpoint, params=params)
+            if r is None:
+                break
+            try:
+                body = r.json()
+            except ValueError:
+                break
+            err = body.get("error")
+            if err and "maintenance" in str(err).lower():
+                maint = True
+                sys.stderr.write(f"    Arctic Shift under maintenance, retry {attempt}/5...\n")
+                time.sleep(3 * attempt)
+                continue
+            data = body.get("data") or []
             break
-        try:
-            data = r.json().get("data") or []
-        except ValueError:
+        if data is None:
+            if maint:
+                sys.stderr.write(f"    ! gave up on {kind}s (Arctic Shift still under maintenance)\n")
             break
         if not data:
             break
         for d in data:
-            out.append(_norm_reddit(d, query))
-        newest = max(int(d.get("created_utc", cursor)) for d in data)
-        if newest <= cursor:
+            out.append(_norm_reddit(d, query, kind))
+        oldest = min(int(d.get("created_utc", cursor)) for d in data)
+        if oldest >= cursor or oldest <= after_epoch:
             break
-        cursor = newest + 1
+        cursor = oldest          # next page: strictly older than what we have
         time.sleep(delay)
     return out
 
 
-def _norm_reddit(d, query):
+def _norm_reddit(d, query, kind="post"):
+    if kind == "comment":
+        # comments carry the advice; they have `body`, no title
+        cid = d.get("id") or d.get("name")
+        return {
+            "source": "reddit_comment",
+            "id": cid,
+            "created_utc": iso(d.get("created_utc", 0)) if d.get("created_utc") else "",
+            "title": "",
+            "text": d.get("body", "") or "",
+            "url": f"https://reddit.com{d.get('permalink', '')}" if d.get("permalink")
+                   else f"https://reddit.com/comments/{str(d.get('link_id','')).replace('t3_','')}",
+            "author": d.get("author", ""),
+            "score": d.get("score", ""),
+            "subreddit": d.get("subreddit", ""),
+            "query": query,
+        }
     return {
         "source": "reddit",
         "id": d.get("id") or d.get("name"),
@@ -334,8 +384,6 @@ def run(cfg):
     keywords = [k for k in cfg.get("keywords", []) if k.strip()]
     phrases = [p for p in cfg.get("phrases", []) if p.strip()]
     queries = keywords + phrases
-    if not queries:
-        sys.exit("No keywords or phrases configured. Edit config.json.")
 
     delay = cfg.get("request_delay_sec", 1.0)
     src = cfg.get("sources", {})
@@ -350,10 +398,15 @@ def run(cfg):
             print("Reddit: OAuth token acquired (searching all of reddit).")
         else:
             print("Reddit: OAuth failed — falling back to subreddit/Arctic Shift if set.")
-    elif rcfg.get("enabled") and not rcfg.get("subreddit"):
-        print("Reddit: no credentials and no subreddit set — Reddit will be skipped.\n"
-              "        Add client_id/client_secret (https://www.reddit.com/prefs/apps)\n"
-              "        or set a \"subreddit\" to use the no-auth Arctic Shift path.")
+
+    # No-auth single-subreddit mode: pull the WHOLE sub for the window ONCE, then
+    # filter locally by keyword/phrase. Robust against Arctic Shift's full-text
+    # search maintenance windows, and lets you re-slice without re-crawling.
+    reddit_sub_mode = bool(rcfg.get("enabled") and rcfg.get("subreddit") and not reddit_token)
+
+    if not queries and not reddit_sub_mode:
+        sys.exit("No keywords or phrases configured. Edit config.json "
+                 "(or set a reddit subreddit to pull everything).")
 
     def add(rec):
         key = (rec["source"], str(rec.get("id")))
@@ -363,16 +416,36 @@ def run(cfg):
         all_records.append(annotate_matches(rec, keywords, phrases))
 
     print(f"Window: last {days} days  ({iso(after_epoch)} -> {iso(before_epoch)})")
+
+    # ---- Reddit: pull entire subreddit once (no-auth path) ----
+    if reddit_sub_mode:
+        sub = rcfg["subreddit"]
+        lim = rcfg.get("limit_per_query", 1000)
+        inc_c = rcfg.get("include_comments", False)
+        print(f"Reddit r/{sub}: pulling ALL posts"
+              f"{'+comments' if inc_c else ''} in window, filtering locally...")
+        recs = fetch_reddit("*", after_epoch, before_epoch, lim,
+                            token=None, subreddit=sub, delay=delay,
+                            include_comments=inc_c)
+        n_post = sum(1 for r in recs if r["source"] == "reddit")
+        n_com = sum(1 for r in recs if r["source"] == "reddit_comment")
+        print(f"  r/{sub}: {n_post} posts, {n_com} comments\n")
+        for r in recs:
+            add(r)
+
     print(f"Queries ({len(queries)}): {queries}\n")
 
     for q in queries:
         print(f"Query: {q!r}")
 
-        if rcfg.get("enabled") and (reddit_token or rcfg.get("subreddit")):
+        # OAuth reddit searches all of reddit per query (subreddit no-auth handled above).
+        if rcfg.get("enabled") and reddit_token:
             lim = rcfg.get("limit_per_query", 300)
             sub = rcfg.get("subreddit")
+            inc_c = rcfg.get("include_comments", False)
             recs = fetch_reddit(q, after_epoch, before_epoch, lim,
-                                token=reddit_token, subreddit=sub, delay=delay)
+                                token=reddit_token, subreddit=sub, delay=delay,
+                                include_comments=inc_c)
             print(f"  reddit      : {len(recs)}")
             for r in recs:
                 add(r)
