@@ -121,6 +121,10 @@ def main():
 
     dates = sorted(r["created_utc"][:10] for r in rows if r.get("created_utc"))
     span = (dates[0], dates[-1]) if dates else ("?", "?")
+    try:
+        ndays = (datetime.strptime(span[1], "%Y-%m-%d") - datetime.strptime(span[0], "%Y-%m-%d")).days
+    except ValueError:
+        ndays = "?"
 
     modules = count_patterns(reddit, PTE_MODULES)
     tools = count_patterns(reddit, TOOLS)
@@ -132,7 +136,7 @@ def main():
 
     L = []
     P = L.append
-    P(f"# PTE 최근 90일 경향 리포트 (r/PTE)\n")
+    P(f"# PTE 최근 {ndays}일 경향 리포트 (r/PTE)\n")
     P(f"- 데이터: `{os.path.basename(path)}`")
     P(f"- 수집 범위: **{span[0]} ~ {span[1]}**")
     P(f"- 총 {len(rows):,}건 — 레딧 글 {len(posts):,} · 댓글 {len(coms):,} · 뉴스 {len(news):,}\n")
@@ -195,6 +199,21 @@ def main():
     thin.sort(key=lambda p: p["score"], reverse=True)
     for p in thin[:12]:
         P(f"- **[+{p['score']}]** {md_escape(p['title'])[:160]}  \n  <{p['url']}>")
+    P("")
+
+    # ---- 8. Recurring advice themes (static synthesis, PTE-stable) ----
+    P("## 8. 고득점자 조언 — 테마별 핵심 정리\n")
+    P("**라이팅 (Essay / SWT)**")
+    P("- 에세이: **쉬운 단어 + 단문·복문·중문 섞기**, 반복 대신 synonym. 4문단 220~240단어, 마지막 5분 문법·철자 검수.")
+    P("- SWT: 핵심 3~4줄만 자기 말로, synonym 교체, 세미콜론(;)으로 한 문장 요건 충족. 복붙 금지.\n")
+    P("**스피킹 (고배점 위주)**")
+    P("- Fluency > Content. 단어 놓쳐도 멈추지 말고 filler로. RS·DI·RL·SGD 단순하게, 문항당 ~25초.")
+    P("- Read Aloud는 전체 지문을 정확한 발음·유창성으로. Superior/CLB9면 내용 누락 금지.\n")
+    P("**리스코어 (Rescore)**")
+    P("- 갭 있는 파트나 오디오대로 못 쓴 WFD가 있으면 재채점 고려. 문제는 결과 나오기 전 시험 직후 즉시 제기해야 인정.\n")
+    P("**도구·멘탈**")
+    P("- ApeUni는 writing/reading/listening 정확·스피킹 과대평가 주의. AI 튜터(Claude/Gemini)로 답안 첨삭.")
+    P("- 파트별 연습보다 반복되는 자기 실수를 진단해 교정. 모의 점수 ≠ 실전 점수(특히 스피킹).")
     P("")
 
     report = "\n".join(L)
