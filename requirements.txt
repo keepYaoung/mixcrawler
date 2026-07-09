@@ -1,0 +1,4 @@
+requests>=2.28
+
+# optional (news full-text extraction):
+# newspaper4k
